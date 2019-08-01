@@ -334,6 +334,105 @@ class PortalTestRunner {
 }
 
 
+/**
+ * Define the runner code used by a web worker to run tests
+ * Each inbound message initiates the process of running a test; each outbound message sends the results
+ * @private
+ */
+function _make_runner(variants, test_names = []) {
+  // The worker reuses the "run one" functionality of the basic test runner: one group/test pair at once
+  // To level the load between workers, it doesn't know ahead of time what tasks will be assigned- just whatever is
+  //  ready.
+
+  const runner = new PortalTestRunner(null, variants, []);
+  const tests = test_names.reduce((acc, name) => {
+    acc[name] = runner.addTest(name);
+  }, {});
+
+  onmessage = function (event) { // Receive a test, execute, and notify when complete
+    const [test_name, group] = event.data;
+    runner._runOne(tests[test_name], group).then(result => {
+      postMessage({ name: 'success', payload: result });
+    });
+  }
+}
+
+/**
+ * A wrapper that allows parallel execution of tests using WebWorkers
+ */
+class PortalTestRunnerParallel {
+  constructor(groups, variants, test_names = [], max_workers = 2) {
+    if (typeof Worker === undefined) {
+      throw new Error('Parallel test execution requires WebWorkers, which your environment does not support');
+    }
+
+    this.groups = groups;
+    this.variants = variants;
+    this._test_names = test_names;
+
+    // Many tests are really fast to run, and a worker has some overhead.
+    // Intelligently choose number of workers: only spin up separate threads if they are justified; eg more than
+    //  one test is available to allocate each worker. We'll always run at least one worker, so a slow test wouldn't
+    //  hang the browser.
+    const num_tests = test_names.length * groups.data.length;
+    this._num_workers = Math.min(max_workers, Math.ceil(num_tests / max_workers));
+  }
+
+  run() {
+    // 1. Initiate the number of web workers requested (or run the executor directly and aggregate results)
+    // 2. Post a message to each one describing which test we are running (proxy by name, b/c we can't pass objects into a worker)
+    // 3. Receive the result of a test, and aggregate the results
+    // 4. Close down each worker when it finishes its tasks and no new ones are available....
+    // 5. Resolve the promise when the last task finishes (what's our criterion here? results.length === tests.length?)
+
+    // Special case: if any single test throws an error, all tests are considered failed with an exception
+    // The total run is computed from n tests * m groups
+    const worker_code = new Blob(['(' + _make_runner.toString() + ')()'], { type: 'application/javascript' });
+    const code_as_url = URL.createObjectURL(worker_code);
+    let workers = [];
+
+    return new Promise((resolve, reject) => {
+
+      const all_tests = this._test_names.map(test => {
+        this.groups.data.map(group => [test, group]);
+      });
+      const all_results = [];
+
+      const _getNextTest = (worker) => {  // Send a new test to the web worker (if any are left)
+        const spec = all_tests.pop();
+        if (spec) {
+          worker.postMessage(spec);
+        }
+      };
+
+      // Generate n independent workers, each one equipped to start tasks
+      workers = Array.from(new Array(this._num_workers), () => {
+        const worker = new Worker(code_as_url);
+        worker.onmessage = event => { // Each time a result is received, give the worker a new task
+          all_results.push(event.data);
+
+          if (all_results.length === all_tests.length) {
+            // Assumption: if what we are receiving is the last expected result, it's ok to end calc and stop all
+            //  web workers, because they already finished their calculations
+            resolve(all_results);
+          } else {
+            _getNextTest(worker);
+          }
+        };
+        // If any single worker fails, we consider the entire calculation failed and end the runner with this error
+        worker.onerror = e => reject(e);
+        return worker;
+      });
+      workers.forEach(worker => _getNextTest(worker));
+    }).finally(() => {
+      // Cleanup to prevent memory leaks: terminate all web workers and revoke code url to prevent memory leaks
+      URL.revokeObjectURL(code_as_url);
+      workers.forEach(worker => worker.terminate());
+    });
+  }
+}
+
+
 function parsePortalJSON(json) {
   const data = json.data || json;
   const groups = new PortalGroupHelper(data.groups.map(item => {
@@ -348,4 +447,4 @@ function parsePortalJSON(json) {
 
 export { PortalVariantsHelper as _PortalVariantsHelper, PortalGroupHelper as _PortalGroupHelper }; // testing only
 
-export { parsePortalJSON, PortalTestRunner, AGGREGATION_TESTS };
+export { parsePortalJSON, PortalTestRunner, PortalTestRunnerParallel, AGGREGATION_TESTS };

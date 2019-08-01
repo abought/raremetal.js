@@ -79,7 +79,7 @@
       }
     }).then(json => { // Use the returned covariance data to run aggregation tests and return results (note that runner.run() returns a Promise)
       const [groups, variants] = raremetal.helpers.parsePortalJSON(json);
-      const runner = new raremetal.helpers.PortalTestRunner(groups, variants, [ // One or more test names can be specified!
+      const runner = new raremetal.helpers.PortalTestRunnerParallel(groups, variants, [ // One or more test names can be specified!
         // 'burden',
         'skat',
         // 'vt'
@@ -95,6 +95,7 @@
     console.log(res);
     results.value = JSON.stringify(res, null, 4);
   }).catch(e => {
+    console.error(e);
     results.value = 'Calculations failed; see JS console for details.'
   });
 </script>
